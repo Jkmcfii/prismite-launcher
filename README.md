@@ -1,65 +1,33 @@
-# Prismite Launcher
+# Prismite
 
-A practical starter for a Java launcher inspired by Modrinth-style launchers. It includes:
+Prismite is a local-only Minecraft mod manager.
 
-- Prismite account sign up/login
-- Google, Discord, and Microsoft OAuth placeholders
-- Discord guild join flow scaffold
-- JavaFX launcher dashboard
-- Instance management
-- Mod browsing endpoint
-- Local H2-backed backend
+What it does:
+- finds a Minecraft installation on your computer
+- lets you choose a .minecraft folder manually
+- lists the mods already installed in the mods folder
+- adds a mod from your computer into the Minecraft mods folder
+- removes mods from the folder
+- opens the mods folder directly
 
-## Quick start
+What it does not do:
+- no Prismite account
+- no Google sign-in
+- no Discord sign-in
+- no Microsoft sign-in
+- no fake OAuth or Discord guild join flow
+- no Minecraft entitlement verification
 
-Backend:
+This project is intentionally kept local-only and user-controlled.
 
-```bash
-cd prismite-backend
-mvn spring-boot:run
-```
-
-Client:
+## Run it
 
 ```bash
 cd prismite-client
 mvn javafx:run
 ```
 
-Then open the JavaFX app and sign in.
-
-## Required environment variables
-
-Copy `.env.example` to `.env` and fill in values when you have real app credentials.
-
-```bash
-cp .env.example .env
-```
-
 ## Notes
 
-This project intentionally keeps OAuth and Minecraft-launch logic in a production-ready scaffold form:
-
-- real secrets are not committed
-- providers can be configured via environment variables
-- Discord guild join is implemented as a backend helper used after OAuth consent
-- Minecraft launch logic is scaffolded in the launcher architecture, with real game launch integration left as a next step
-
-## Included features
-
-- Prismite user account auth
-- OAuth provider placeholders for Google, Discord, and Microsoft
-- Discord guild join helper (server-join after auth)
-- launcher dashboard UI
-- instance creation and listing
-- mock Modrinth-style mod browser
-
-## Production next steps
-
-- Add Azure app registration for Microsoft
-- Add Google Cloud OAuth app
-- Add Discord app + bot + guild
-- Add real Minecraft version manifest handling
-- Add Java detection and launch command generation
-- Add secure PostgreSQL persistence
-- Add token verification and refresh flow
+This app assumes you already own Minecraft Java Edition and that you run the official Minecraft launcher or install Minecraft separately.
+It simply manages the mods folder in a Minecraft installation you choose.
