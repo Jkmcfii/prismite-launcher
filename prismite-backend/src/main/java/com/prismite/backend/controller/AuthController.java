@@ -88,9 +88,51 @@ public class AuthController {
         return ResponseEntity.ok(Map.of("url", googleAuthService.buildAuthUrl(googleRedirectUri)));
     }
 
+    @GetMapping("/google/callback")
+    public ResponseEntity<?> googleCallback(@RequestParam String code) {
+        Map<String, Object> profile = googleAuthService.exchangeCode(code, googleRedirectUri);
+        String email = String.valueOf(profile.getOrDefault("email", "user@example.com"));
+        String name = String.valueOf(profile.getOrDefault("name", "Google User"));
+        String providerUserId = String.valueOf(profile.getOrDefault("externalUserId", "google-user"));
+
+        var authResponse = authService.registerOrLoginExternal("google", email, name);
+        authService.connectExternalAccount(email, "google", providerUserId);
+
+        return ResponseEntity.ok(Map.of(
+                "token", authResponse.getToken(),
+                "username", authResponse.getUsername(),
+                "email", email,
+                "provider", "google",
+                "linked", true
+        ));
+    }
+
     @GetMapping("/discord/start")
     public ResponseEntity<?> discordStart() {
         return ResponseEntity.ok(Map.of("url", discordAuthService.buildAuthUrl(discordRedirectUri)));
+    }
+
+    @GetMapping("/discord/callback")
+    public ResponseEntity<?> discordCallback(@RequestParam String code) {
+        Map<String, Object> profile = discordAuthService.exchangeCode(code, discordRedirectUri);
+        String email = String.valueOf(profile.getOrDefault("email", "user@example.com"));
+        String name = String.valueOf(profile.getOrDefault("name", "Discord User"));
+        String providerUserId = String.valueOf(profile.getOrDefault("externalUserId", "discord-user"));
+        String accessToken = String.valueOf(profile.getOrDefault("accessToken", ""));
+
+        var authResponse = authService.registerOrLoginExternal("discord", email, name);
+        authService.connectExternalAccount(email, "discord", providerUserId);
+
+        boolean joined = discordAuthService.joinGuild(providerUserId, accessToken);
+
+        return ResponseEntity.ok(Map.of(
+                "token", authResponse.getToken(),
+                "username", authResponse.getUsername(),
+                "email", email,
+                "provider", "discord",
+                "linked", true,
+                "guildJoined", joined
+        ));
     }
 
     @GetMapping("/microsoft/start")
@@ -100,6 +142,28 @@ public class AuthController {
             clientId = microsoftClientId;
         }
         return ResponseEntity.ok(Map.of("url", microsoftAuthService.buildAuthUrl(clientId, microsoftRedirectUri, microsoftTenantId)));
+    }
+
+    @GetMapping("/microsoft/callback")
+    public ResponseEntity<?> microsoftCallback(@RequestParam String code) {
+        Map<String, Object> profile = microsoftAuthService.exchangeCode(code, microsoftRedirectUri);
+        String email = String.valueOf(profile.getOrDefault("email", "user@example.com"));
+        String name = String.valueOf(profile.getOrDefault("name", "Microsoft User"));
+        String providerUserId = String.valueOf(profile.getOrDefault("externalUserId", "microsoft-user"));
+
+        var authResponse = authService.registerOrLoginExternal("microsoft", email, name);
+        authService.connectExternalAccount(email, "microsoft", providerUserId);
+
+        boolean ownsMinecraft = microsoftAuthService.validateMinecraftOwnership();
+
+        return ResponseEntity.ok(Map.of(
+                "token", authResponse.getToken(),
+                "username", authResponse.getUsername(),
+                "email", email,
+                "provider", "microsoft",
+                "linked", true,
+                "minecraftOwned", ownsMinecraft
+        ));
     }
 
     @PostMapping("/connect-oauth")

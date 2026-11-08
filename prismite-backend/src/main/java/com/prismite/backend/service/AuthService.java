@@ -1,12 +1,12 @@
 package com.prismite.backend.service;
 
-import com.prismite.backend.dto.AuthResponse;
 import com.prismite.backend.model.User;
 import com.prismite.backend.repository.UserRepository;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
+import java.util.Optional;
 
 @Service
 public class AuthService {
@@ -55,6 +55,27 @@ public class AuthService {
     public User findByEmail(String email) {
         return userRepository.findByEmail(email)
                 .orElseThrow(() -> new IllegalArgumentException("User not found"));
+    }
+
+    public AuthResponse registerOrLoginExternal(String provider, String email, String username) {
+        Optional<User> existing = userRepository.findByEmail(email);
+        User user = existing.orElseGet(() -> {
+            String generatedUsername = username == null || username.isBlank() ? email.split("@")[0] : username;
+            String uniqueUsername = generatedUsername;
+            int candidate = 1;
+            while (userRepository.existsByUsername(uniqueUsername)) {
+                uniqueUsername = generatedUsername + candidate;
+                candidate++;
+            }
+            return userRepository.save(new User(email, uniqueUsername, passwordEncoder.encode("oauth-user-" + System.nanoTime())));
+        });
+
+        user.setEmailVerified(true);
+        user.setLastLoginAt(Instant.now());
+        userRepository.save(user);
+
+        String token = jwtService.generateToken(user.getEmail());
+        return new AuthResponse(token, user.getUsername(), user.getEmail());
     }
 
     public User connectExternalAccount(String email, String provider, String externalUserId) {
