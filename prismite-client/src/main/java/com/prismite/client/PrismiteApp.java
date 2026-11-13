@@ -1,8 +1,9 @@
 package com.prismite.client;
 
-import javafx.application.Platform;
+import javafx.application.Application;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
+import javafx.scene.Scene;
 import javafx.scene.control.*;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
@@ -12,337 +13,642 @@ import javafx.scene.paint.Color;
 import javafx.scene.text.Font;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
-import javafx.stage.Window;
+import javafx.stage.Stage;
 
 import java.awt.Desktop;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.io.*;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.util.*;
+import java.util.concurrent.CompletableFuture;
 
-public class PrismiteApp {
+public class Main extends Application {
+    @Override
+    public void start(Stage stage) {
+        PrismiteApp app = new PrismiteApp();
+        Scene scene = new Scene(app.getRoot(), 1100, 760);
+        stage.setTitle("Prismite");
+        stage.setScene(scene);
+        stage.show();
+    }
+
+    public static void main(String[] args) {
+        launch(args);
+    }
+}
+
+class PrismiteApp {
     private final BorderPane root = new BorderPane();
-    private final InstanceStore instances = new InstanceStore();
-    private final ModrinthClient modrinth = new ModrinthClient();
-    private final ModBackupService backups = new ModBackupService();
-    private final ModMetadataReader metadata = new ModMetadataReader();
-    private final ExecutorService worker = Executors.newFixedThreadPool(3, r -> { Thread t = new Thread(r, "prismite-worker"); t.setDaemon(true); return t; });
-    private final ComboBox<InstanceStore.InstanceProfile> instanceChoice = new ComboBox<>();
-    private final ListView<String> installedMods = new ListView<>();
-    private final ListView<ModrinthClient.Project> searchResults = new ListView<>();
+    private final ListView<String> instanceList = new ListView<>();
+    private final ListView<String> modList = new ListView<>();
+    private final ListView<String> searchList = new ListView<>();
+    private final TextArea log = new TextArea();
     private final TextField searchField = new TextField();
-    private final TextArea activity = new TextArea();
-    private final Label status = new Label("Starting Prismite…");
-    private final ComboBox<String> loaderFilter = new ComboBox<>();
-    private final ProgressIndicator progress = new ProgressIndicator();
+    private final ComboBox<String> versionBox = new ComboBox<>();
+    private final ComboBox<String> loaderBox = new ComboBox<>();
+    private final Label status = new Label("Ready");
+    private final HttpClient http = HttpClient.newHttpClient();
+    private final Path home = Path.of(System.getProperty("user.home"), ".prismite");
+    private final Path propsFile = home.resolve("instances.properties");
+    private final Map<String, InstanceProfile> instances = new LinkedHashMap<>();
+    private String selectedInstanceId;
 
     public PrismiteApp() {
         root.setPadding(new Insets(18));
         root.setStyle("-fx-background-color: #0E1117;");
+
         Label title = new Label("Prismite");
         title.setTextFill(Color.web("#F5F7FF"));
-        title.setFont(Font.font("Segoe UI", 30));
-        Label subtitle = new Label("Discover, install, and manage Minecraft mods");
+        title.setFont(Font.font("Segoe UI", 32));
+
+        Label subtitle = new Label("Local Minecraft mod manager");
         subtitle.setTextFill(Color.web("#B8C1D9"));
-        VBox header = new VBox(3, title, subtitle);
+
+        VBox header = new VBox(4, title, subtitle);
         header.setPadding(new Insets(0, 0, 12, 0));
 
-        instanceChoice.setPrefWidth(420);
-        instanceChoice.setPromptText("Select instance");
-        instanceChoice.setOnAction(e -> refreshInstalledMods());
-        status.setTextFill(Color.web("#B8C1D9"));
-        progress.setMaxSize(22, 22);
-        progress.setVisible(false);
-        HBox footer = new HBox(10, progress, status);
-        footer.setAlignment(Pos.CENTER_LEFT);
-        footer.setPadding(new Insets(10, 0, 0, 0));
+        versionBox.getItems().addAll("1.21.1", "1.20.1", "1.19.2", "1.18.2");
+        versionBox.setValue("1.21.1");
+        loaderBox.getItems().addAll("fabric", "forge", "quilt", "vanilla");
+        loaderBox.setValue("fabric");
 
-        TabPane tabs = new TabPane();
-        tabs.getTabs().addAll(createBrowseTab(), createLibraryTab(), createBackupTab());
-        tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
-        root.setTop(header);
-        root.setCenter(tabs);
-        root.setBottom(footer);
-        loadOrCreateStarterInstance();
-    }
+        Button newInstanceBtn = styledButton("New instance", "#52D7FF", "#0E1117");
+        Button importInstanceBtn = styledButton("Import folder", "#9A6BFF", "#FFFFFF");
+        Button refreshBtn = styledButton("Refresh", "#303846", "#FFFFFF");
+        Button addModBtn = styledButton("Add mod", "#FFD166", "#0E1117");
+        Button removeModBtn = styledButton("Remove selected", "#C94B55", "#FFFFFF");
+        Button openFolderBtn = styledButton("Open mods folder", "#4CAF50", "#FFFFFF");
+        Button backupBtn = styledButton("Backup mods", "#52D7FF", "#0E1117");
+        Button restoreBtn = styledButton("Restore backup", "#9A6BFF", "#FFFFFF");
+        Button searchBtn = styledButton("Search Modrinth", "#9A6BFF", "#FFFFFF");
+        Button installBtn = styledButton("Install selected", "#52D7FF", "#0E1117");
 
-    public BorderPane getRoot() { return root; }
+        newInstanceBtn.setOnAction(e -> createInstance());
+        importInstanceBtn.setOnAction(e -> importFolder());
+        refreshBtn.setOnAction(e -> refreshAll());
+        addModBtn.setOnAction(e -> addLocalMod());
+        removeModBtn.setOnAction(e -> removeSelectedMod());
+        openFolderBtn.setOnAction(e -> openSelectedModsFolder());
+        backupBtn.setOnAction(e -> backupMods());
+        restoreBtn.setOnAction(e -> restoreBackup());
+        searchBtn.setOnAction(e -> searchModrinth());
+        installBtn.setOnAction(e -> installSelectedMod());
 
-    private Tab createBrowseTab() {
-        VBox panel = panel();
-        Label heading = heading("Discover mods");
-        Label info = muted("Browse Modrinth without an account. Select an instance to filter by Minecraft version and loader.");
-        HBox instanceBar = new HBox(10, new Label("Install into:"), instanceChoice,
-                new Label("Loader:"), loaderFilter);
-        instanceBar.setAlignment(Pos.CENTER_LEFT);
-        loaderFilter.getItems().addAll("Use instance loader", "fabric", "forge", "neoforge", "quilt", "fabric (server)");
-        loaderFilter.setValue("Use instance loader");
-        searchField.setPromptText("Search mods, e.g. Sodium, minimap, performance…");
-        Button search = button("Search", "#9A6BFF", "#FFFFFF");
-        Button install = button("Install selected mod", "#52D7FF", "#0E1117");
-        HBox searchRow = new HBox(8, searchField, search, install);
+        instanceList.setPrefWidth(340);
+        instanceList.setPrefHeight(200);
+        instanceList.setOnMouseClicked(e -> {
+            if (e.getClickCount() == 1) {
+                String selected = instanceList.getSelectionModel().getSelectedItem();
+                if (selected != null) {
+                    selectedInstanceId = selected.substring(0, selected.indexOf(" | "));
+                    refreshModsForSelectedInstance();
+                }
+            }
+        });
+
+        modList.setPrefHeight(240);
+        searchList.setPrefHeight(240);
+        log.setEditable(false);
+        log.setWrapText(true);
+        log.setPrefHeight(200);
+
+        HBox topActions = new HBox(8, newInstanceBtn, importInstanceBtn, refreshBtn);
+        HBox modActions = new HBox(8, addModBtn, removeModBtn, openFolderBtn, backupBtn, restoreBtn);
+        HBox searchRow = new HBox(8, searchField, versionBox, loaderBox, searchBtn, installBtn);
         HBox.setHgrow(searchField, Priority.ALWAYS);
-        searchResults.setCellFactory(view -> new ListCell<>() {
-            @Override protected void updateItem(ModrinthClient.Project project, boolean empty) {
-                super.updateItem(project, empty);
-                if (empty || project == null) { setText(null); setGraphic(null); return; }
-                Label name = new Label(project.title());
-                name.setTextFill(Color.web("#F5F7FF"));
-                name.setFont(Font.font("Segoe UI", 15));
-                Label description = new Label(project.description());
-                description.setTextFill(Color.web("#B8C1D9"));
-                description.setWrapText(true);
-                Label meta = new Label(project.author() + " · " + project.downloads() + " downloads · " + String.join(", ", project.categories()));
-                meta.setTextFill(Color.web("#52D7FF"));
-                VBox card = new VBox(4, name, description, meta);
-                card.setPadding(new Insets(8));
-                setGraphic(card);
+
+        VBox left = new VBox(10,
+                new Label("Instances"),
+                instanceList,
+                topActions,
+                new Label("Mods"),
+                modList,
+                modActions
+        );
+        left.setPrefWidth(420);
+
+        VBox right = new VBox(10,
+                new Label("Install mods"),
+                searchRow,
+                searchList,
+                log
+        );
+        right.setVgrow(log, Priority.ALWAYS);
+
+        HBox main = new HBox(18, left, right);
+        main.setAlignment(Pos.TOP_LEFT);
+        root.setTop(header);
+        root.setCenter(main);
+        root.setBottom(status);
+        BorderPane.setMargin(status, new Insets(12, 0, 0, 0));
+
+        initProfiles();
+        refreshAll();
+    }
+
+    private void initProfiles() {
+        try {
+            Files.createDirectories(home);
+            if (!Files.exists(propsFile)) {
+                String defaultDir = defaultMinecraftDirectory().toString();
+                saveProfile(new InstanceProfile("default", "Default", "1.21.1", "fabric", defaultDir));
             }
-        });
-        searchResults.setPlaceholder(muted("Search to browse compatible Modrinth projects."));
-        searchResults.setPrefHeight(430);
-        search.setOnAction(e -> searchModrinth());
-        searchField.setOnAction(e -> searchModrinth());
-        install.setOnAction(e -> installSelectedMod());
-        Button details = button("Project details", "#303846", "#FFFFFF");
-        details.setOnAction(e -> showProjectDetails());
-        HBox bottom = new HBox(8, details);
-        panel.getChildren().addAll(heading, info, instanceBar, searchRow, searchResults, bottom);
-        VBox.setVgrow(searchResults, Priority.ALWAYS);
-        return tab("Discover", panel);
+            loadProfiles();
+        } catch (IOException e) {
+            log.appendText("Failed to initialize profiles: " + e.getMessage() + System.lineSeparator());
+        }
     }
 
-    private Tab createLibraryTab() {
-        VBox panel = panel();
-        Label heading = heading("My mods");
-        Label note = muted("Changes affect only the selected instance. The official Minecraft launcher remains responsible for sign-in and playing.");
-        Button create = button("New isolated instance", "#52D7FF", "#0E1117");
-        Button importFolder = button("Import game folder…", "#9A6BFF", "#FFFFFF");
-        Button openFolder = button("Open instance folder", "#303846", "#FFFFFF");
-        Button addLocal = button("Add local mod…", "#FFD166", "#0E1117");
-        Button remove = button("Remove selected", "#C94B55", "#FFFFFF");
-        Button refresh = button("Refresh", "#303846", "#FFFFFF");
-        create.setOnAction(e -> createInstanceDialog());
-        importFolder.setOnAction(e -> importInstanceDialog());
-        openFolder.setOnAction(e -> withInstance(p -> openDirectory(Path.of(p.gameDirectory()))));
-        addLocal.setOnAction(e -> addLocalMod());
-        remove.setOnAction(e -> removeSelectedMod());
-        refresh.setOnAction(e -> refreshInstalledMods());
-        HBox row = new HBox(8, create, importFolder, openFolder);
-        HBox modActions = new HBox(8, addLocal, remove, refresh);
-        installedMods.setPlaceholder(muted("No mod files in this instance yet."));
-        installedMods.setPrefHeight(420);
-        installedMods.setCellFactory(view -> new ListCell<>() {
-            @Override protected void updateItem(String item, boolean empty) {
-                super.updateItem(item, empty);
-                setText(empty ? null : item);
-                if (!empty) setTextFill(Color.web("#F5F7FF"));
+    private Path defaultMinecraftDirectory() {
+        String homePath = System.getProperty("user.home");
+        String os = System.getProperty("os.name").toLowerCase(Locale.ROOT);
+        if (os.contains("win")) {
+            String appData = System.getenv().getOrDefault("APPDATA", homePath);
+            return Path.of(appData, ".minecraft");
+        }
+        if (os.contains("mac")) {
+            return Path.of(homePath, "Library", "Application Support", "minecraft");
+        }
+        return Path.of(homePath, ".minecraft");
+    }
+
+    private void loadProfiles() throws IOException {
+        Properties p = new Properties();
+        if (Files.exists(propsFile)) {
+            try (InputStream in = Files.newInputStream(propsFile)) {
+                p.load(in);
             }
-        });
-        panel.getChildren().addAll(heading, note, instanceChoice, row, modActions, installedMods);
-        VBox.setVgrow(installedMods, Priority.ALWAYS);
-        return tab("My mods", panel);
+        }
+        instances.clear();
+        for (String key : p.stringPropertyNames()) {
+            String value = p.getProperty(key);
+            if (value == null || value.isBlank()) continue;
+            String[] parts = value.split("\\|", -1);
+            if (parts.length >= 4) {
+                instances.put(key, new InstanceProfile(key, parts[0], parts[1], parts[2], parts[3]));
+            }
+        }
+        if (instances.isEmpty()) {
+            String id = "default";
+            InstanceProfile profile = new InstanceProfile(id, "Default", "1.21.1", "fabric", defaultMinecraftDirectory().toString());
+            saveProfile(profile);
+            instances.put(id, profile);
+        }
+        selectedInstanceId = instances.keySet().iterator().next();
     }
 
-    private Tab createBackupTab() {
-        VBox panel = panel();
-        Label heading = heading("Backups and activity");
-        Label info = muted("Back up or restore mod files for the selected instance. Prismite never handles account credentials.");
-        Button backup = button("Back up mods…", "#52D7FF", "#0E1117");
-        Button restore = button("Restore backup…", "#9A6BFF", "#FFFFFF");
-        backup.setOnAction(e -> backupMods());
-        restore.setOnAction(e -> restoreMods());
-        activity.setEditable(false);
-        activity.setWrapText(true);
-        panel.getChildren().addAll(heading, info, instanceChoice, new HBox(8, backup, restore), activity);
-        VBox.setVgrow(activity, Priority.ALWAYS);
-        return tab("Backups", panel);
+    private void saveProfile(InstanceProfile profile) throws IOException {
+        Files.createDirectories(home);
+        Properties p = new Properties();
+        if (Files.exists(propsFile)) {
+            try (InputStream in = Files.newInputStream(propsFile)) {
+                p.load(in);
+            }
+        }
+        p.setProperty(profile.id(), profile.name() + "|" + profile.version() + "|" + profile.loader() + "|" + profile.directory());
+        try (OutputStream out = Files.newOutputStream(propsFile)) {
+            p.store(out, "Prismite instances");
+        }
     }
 
-    private void loadOrCreateStarterInstance() {
-        runTask(() -> {
-            List<InstanceStore.InstanceProfile> list = instances.list();
-            if (list.isEmpty()) list.add(instances.create("My mods", "1.21.1", "fabric"));
-            return list;
-        }, profiles -> {
-            instanceChoice.getItems().setAll(profiles);
-            instanceChoice.setValue(profiles.get(0));
-            status.setText("Ready · local-only · no sign-in required");
-            refreshInstalledMods();
-            searchModrinth();
-        });
+    private void refreshAll() {
+        refreshInstanceList();
+        refreshModsForSelectedInstance();
     }
 
-    private void createInstanceDialog() {
-        TextInputDialog dialog = new TextInputDialog("My modpack");
-        dialog.setTitle("New instance");
-        dialog.setHeaderText("Create an isolated mod folder");
-        dialog.setContentText("Instance name:");
-        dialog.showAndWait().filter(s -> !s.isBlank()).ifPresent(name -> runTask(
-                () -> instances.create(name.trim(), selectedInstance() == null ? "1.21.1" : selectedInstance().gameVersion(), selectedInstance() == null ? "fabric" : selectedInstance().loader()),
-                profile -> { reloadInstances(profile.id()); log("Created " + profile.name()); }));
+    private void refreshInstanceList() {
+        List<String> items = new ArrayList<>();
+        for (InstanceProfile p : instances.values()) {
+            items.add(p.id() + " | " + p.name() + " | " + p.version() + " | " + p.loader());
+        }
+        instanceList.getItems().setAll(items);
+        if (selectedInstanceId == null && !instances.isEmpty()) {
+            selectedInstanceId = instances.keySet().iterator().next();
+        }
     }
 
-    private void importInstanceDialog() {
+    private void refreshModsForSelectedInstance() {
+        if (selectedInstanceId == null) {
+            modList.getItems().clear();
+            return;
+        }
+        InstanceProfile profile = instances.get(selectedInstanceId);
+        if (profile == null) {
+            modList.getItems().clear();
+            return;
+        }
+        Path modsDir = profile.modsDir();
+        try {
+            Files.createDirectories(modsDir);
+            List<String> names = new ArrayList<>();
+            try (DirectoryStream<Path> stream = Files.newDirectoryStream(modsDir)) {
+                for (Path p : stream) {
+                    String name = p.getFileName().toString();
+                    if (name.endsWith(".jar") || name.endsWith(".zip")) {
+                        names.add(name);
+                    }
+                }
+            }
+            names.sort(String::compareToIgnoreCase);
+            modList.getItems().setAll(names);
+            status.setText("Selected: " + profile.name() + " · mods: " + names.size());
+        } catch (IOException e) {
+            status.setText("Could not read mods folder");
+            log.appendText("Error: " + e.getMessage() + System.lineSeparator());
+        }
+    }
+
+    private void createInstance() {
+        TextInputDialog dialog = new TextInputDialog("My pack");
+        dialog.setTitle("Create a new instance");
+        dialog.setHeaderText("New isolated instance");
+        dialog.setContentText("Name:");
+        Optional<String> result = dialog.showAndWait();
+        if (result.isEmpty() || result.get().isBlank()) {
+            return;
+        }
+
+        String name = result.get().trim();
+        String version = versionBox.getValue();
+        String loader = loaderBox.getValue();
+
+        String id = cleanId(name);
+        Path dir = home.resolve("instances").resolve(id).resolve(".minecraft");
+        try {
+            Files.createDirectories(dir.resolve("mods"));
+            Files.createDirectories(dir.resolve("config"));
+            InstanceProfile profile = new InstanceProfile(id, name, version, loader, dir.toString());
+            saveProfile(profile);
+            instances.put(id, profile);
+            selectedInstanceId = id;
+            refreshInstanceList();
+            refreshModsForSelectedInstance();
+            log.appendText("Created instance: " + name + System.lineSeparator());
+        } catch (IOException e) {
+            log.appendText("Could not create instance: " + e.getMessage() + System.lineSeparator());
+        }
+    }
+
+    private void importFolder() {
         DirectoryChooser chooser = new DirectoryChooser();
-        chooser.setTitle("Choose an existing Minecraft game directory");
-        java.io.File selected = chooser.showDialog(window());
+        chooser.setTitle("Choose an existing Minecraft folder");
+        File selected = chooser.showDialog(root.getScene().getWindow());
         if (selected == null) return;
-        TextInputDialog name = new TextInputDialog("Imported game");
-        name.setTitle("Import instance");
-        name.setHeaderText("Name this instance");
-        name.setContentText("Instance name:");
-        name.showAndWait().filter(s -> !s.isBlank()).ifPresent(value -> runTask(
-                () -> instances.importDirectory(value.trim(), "1.21.1", "fabric", selected.toPath()),
-                profile -> { reloadInstances(profile.id()); log("Imported " + profile.gameDirectory()); }));
-    }
 
-    private void reloadInstances(String selectId) {
-        runTask(instances::list, profiles -> {
-            instanceChoice.getItems().setAll(profiles);
-            if (selectId != null) profiles.stream().filter(p -> p.id().equals(selectId)).findFirst().ifPresent(instanceChoice::setValue);
-            else if (!profiles.isEmpty()) instanceChoice.setValue(profiles.get(0));
-            refreshInstalledMods();
-        });
-    }
+        TextInputDialog nameDialog = new TextInputDialog(selected.getName());
+        nameDialog.setTitle("Import Minecraft folder");
+        nameDialog.setHeaderText("Give this instance a name");
+        nameDialog.setContentText("Instance name:");
+        Optional<String> nameResult = nameDialog.showAndWait();
+        if (nameResult.isEmpty() || nameResult.get().isBlank()) return;
 
-    private void refreshInstalledMods() {
-        InstanceStore.InstanceProfile profile = instanceChoice.getValue();
-        if (profile == null) { installedMods.getItems().clear(); return; }
-        runTask(() -> {
-            try (var files = Files.list(instances.modsDirectory(profile))) {
-                return files.filter(Files::isRegularFile)
-                        .filter(p -> p.toString().toLowerCase().endsWith(".jar") || p.toString().toLowerCase().endsWith(".zip"))
-                        .sorted().map(metadata::describe).toList();
-            }
-        }, installedMods.getItems()::setAll);
-    }
-
-    private void searchModrinth() {
-        InstanceStore.InstanceProfile profile = instanceChoice.getValue();
-        if (profile == null) { status.setText("Create an instance to search compatible mods."); return; }
-        status.setText("Searching Modrinth…");
-        String loader = selectedLoader(profile);
-        runTask(() -> modrinth.search(searchField.getText().trim(), profile.gameVersion(), loader), projects -> {
-            searchResults.getItems().setAll(projects);
-            status.setText("Found " + projects.size() + " compatible project(s) · Minecraft " + profile.gameVersion() + " · " + loader);
-        });
-    }
-
-    private String selectedLoader(InstanceStore.InstanceProfile profile) {
-        String selected = loaderFilter.getValue();
-        if (selected == null || selected.equals("Use instance loader") || selected.endsWith("(server)")) return profile.loader();
-        return selected;
-    }
-
-    private void installSelectedMod() {
-        InstanceStore.InstanceProfile profile = instanceChoice.getValue();
-        ModrinthClient.Project project = searchResults.getSelectionModel().getSelectedItem();
-        if (profile == null || project == null) { status.setText("Select an instance and a mod first."); return; }
-        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
-                "Install " + project.title() + " and any required Modrinth dependencies into " + profile.name() + "?", ButtonType.YES, ButtonType.NO);
-        confirm.setHeaderText("Mod downloads come from Modrinth");
-        confirm.showAndWait().filter(ButtonType.YES::equals).ifPresent(button -> {
-            setBusy(true, "Installing " + project.title() + "…");
-            runTask(() -> modrinth.installProject(project.id(), profile.gameVersion(), selectedLoader(profile), instances.modsDirectory(profile)), paths -> {
-                setBusy(false, "Installed " + paths.size() + " file(s) into " + profile.name());
-                paths.forEach(path -> log("Installed " + path.getFileName()));
-                refreshInstalledMods();
-            });
-        });
-    }
-
-    private void showProjectDetails() {
-        ModrinthClient.Project project = searchResults.getSelectionModel().getSelectedItem();
-        if (project == null) { status.setText("Choose a project first."); return; }
-        setBusy(true, "Loading project details…");
-        runTask(() -> modrinth.details(project.id()), details -> {
-            setBusy(false, "Ready");
-            TextArea text = new TextArea(details.body());
-            text.setEditable(false);
-            text.setWrapText(true);
-            text.setPrefColumnCount(70);
-            text.setPrefRowCount(22);
-            Alert dialog = new Alert(Alert.AlertType.INFORMATION);
-            dialog.setTitle(details.title());
-            dialog.setHeaderText(details.title() + " · " + project.author() + " · " + project.downloads() + " downloads");
-            dialog.getDialogPane().setContent(text);
-            dialog.getDialogPane().setPrefWidth(700);
-            dialog.showAndWait();
-        });
+        String name = nameResult.get().trim();
+        String id = cleanId(name);
+        try {
+            InstanceProfile profile = new InstanceProfile(id, name, versionBox.getValue(), loaderBox.getValue(), selected.toPath().toString());
+            saveProfile(profile);
+            instances.put(id, profile);
+            selectedInstanceId = id;
+            refreshInstanceList();
+            refreshModsForSelectedInstance();
+            log.appendText("Imported folder: " + selected.getAbsolutePath() + System.lineSeparator());
+        } catch (IOException e) {
+            log.appendText("Could not import folder: " + e.getMessage() + System.lineSeparator());
+        }
     }
 
     private void addLocalMod() {
-        InstanceStore.InstanceProfile profile = instanceChoice.getValue();
-        if (profile == null) return;
+        InstanceProfile profile = getSelectedProfile();
+        if (profile == null) {
+            return;
+        }
+
         FileChooser chooser = new FileChooser();
-        chooser.setTitle("Select mod archive");
-        chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("Mod archives", "*.jar", "*.zip"));
-        java.io.File file = chooser.showOpenDialog(window());
-        if (file == null) return;
-        runTask(() -> {
-            Path dir = instances.modsDirectory(profile);
-            Path target = dir.resolve(file.getName()).normalize();
-            if (!target.getParent().equals(dir.toAbsolutePath().normalize())) throw new IOException("Invalid filename");
-            Files.copy(file.toPath(), target, StandardCopyOption.REPLACE_EXISTING);
-            return target;
-        }, path -> { log("Added " + path.getFileName()); refreshInstalledMods(); });
+        chooser.setTitle("Choose a mod file");
+        chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("Mod files", "*.jar", "*.zip"));
+        File selected = chooser.showOpenDialog(root.getScene().getWindow());
+        if (selected == null) return;
+
+        try {
+            Path target = profile.modsDir().resolve(selected.getName());
+            Files.copy(selected.toPath(), target, StandardCopyOption.REPLACE_EXISTING);
+            refreshModsForSelectedInstance();
+            log.appendText("Added mod: " + selected.getName() + System.lineSeparator());
+        } catch (IOException e) {
+            log.appendText("Failed to add mod: " + e.getMessage() + System.lineSeparator());
+        }
     }
 
     private void removeSelectedMod() {
-        String selected = installedMods.getSelectionModel().getSelectedItem();
-        InstanceStore.InstanceProfile profile = instanceChoice.getValue();
-        if (selected == null || profile == null) { status.setText("Select an installed mod first."); return; }
-        String filename = selected.split("  ·  ", 2)[0];
-        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, "Remove " + filename + "?", ButtonType.YES, ButtonType.NO);
-        confirm.showAndWait().filter(ButtonType.YES::equals).ifPresent(button -> runTask(() -> Files.deleteIfExists(instances.modsDirectory(profile).resolve(filename).normalize()), removed -> {
-            log("Removed " + filename);
-            refreshInstalledMods();
-        }));
+        InstanceProfile profile = getSelectedProfile();
+        String selected = modList.getSelectionModel().getSelectedItem();
+        if (profile == null || selected == null) {
+            log.appendText("Select a mod to remove first." + System.lineSeparator());
+            return;
+        }
+
+        try {
+            Files.deleteIfExists(profile.modsDir().resolve(selected));
+            refreshModsForSelectedInstance();
+            log.appendText("Removed mod: " + selected + System.lineSeparator());
+        } catch (IOException e) {
+            log.appendText("Could not remove mod: " + e.getMessage() + System.lineSeparator());
+        }
+    }
+
+    private void openSelectedModsFolder() {
+        InstanceProfile profile = getSelectedProfile();
+        if (profile == null) return;
+        try {
+            Path modsDir = profile.modsDir();
+            Files.createDirectories(modsDir);
+            if (Desktop.isDesktopSupported()) {
+                Desktop.getDesktop().open(modsDir.toFile());
+            } else {
+                log.appendText("Opening folders is not supported on this system." + System.lineSeparator());
+            }
+        } catch (IOException e) {
+            log.appendText("Could not open mods folder: " + e.getMessage() + System.lineSeparator());
+        }
     }
 
     private void backupMods() {
-        InstanceStore.InstanceProfile profile = instanceChoice.getValue();
+        InstanceProfile profile = getSelectedProfile();
         if (profile == null) return;
         FileChooser chooser = new FileChooser();
-        chooser.setTitle("Save mods backup");
-        chooser.setInitialFileName(profile.name().replaceAll("[^A-Za-z0-9._-]", "_") + "-mods.zip");
+        chooser.setTitle("Save backup ZIP");
         chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("ZIP", "*.zip"));
-        java.io.File file = chooser.showSaveDialog(window());
-        if (file != null) runTask(() -> { backups.backup(instances.modsDirectory(profile), file.toPath()); return file.toPath(); }, path -> log("Backup saved: " + path));
+        chooser.setInitialFileName(profile.name() + "-mods.zip");
+        File file = chooser.showSaveDialog(root.getScene().getWindow());
+        if (file == null) return;
+
+        try {
+            Path backupPath = file.toPath();
+            try (ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(backupPath))) {
+                Path modsDir = profile.modsDir();
+                try (DirectoryStream<Path> stream = Files.newDirectoryStream(modsDir)) {
+                    for (Path p : stream) {
+                        String name = p.getFileName().toString();
+                        if (name.endsWith(".jar") || name.endsWith(".zip")) {
+                            zip.putNextEntry(new ZipEntry("mods/" + name));
+                            Files.copy(p, zip);
+                            zip.closeEntry();
+                        }
+                    }
+                }
+            }
+            log.appendText("Backup saved: " + backupPath + System.lineSeparator());
+        } catch (IOException e) {
+            log.appendText("Backup failed: " + e.getMessage() + System.lineSeparator());
+        }
     }
 
-    private void restoreMods() {
-        InstanceStore.InstanceProfile profile = instanceChoice.getValue();
+    private void restoreBackup() {
+        InstanceProfile profile = getSelectedProfile();
         if (profile == null) return;
         FileChooser chooser = new FileChooser();
-        chooser.setTitle("Choose backup ZIP");
+        chooser.setTitle("Choose a backup ZIP");
         chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("ZIP", "*.zip"));
-        java.io.File file = chooser.showOpenDialog(window());
-        if (file != null) runTask(() -> backups.restore(file.toPath(), instances.modsDirectory(profile)), count -> { log("Restored " + count + " file(s)"); refreshInstalledMods(); });
+        File file = chooser.showOpenDialog(root.getScene().getWindow());
+        if (file == null) return;
+
+        try {
+            int restored = 0;
+            try (ZipInputStream zip = new ZipInputStream(Files.newInputStream(file.toPath()))) {
+                ZipEntry entry;
+                while ((entry = zip.getNextEntry()) != null) {
+                    String name = entry.getName();
+                    if (name.startsWith("mods/") && (name.endsWith(".jar") || name.endsWith(".zip"))) {
+                        String fileName = name.substring("mods/".length());
+                        Path destination = profile.modsDir().resolve(fileName);
+                        Files.copy(zip, destination, StandardCopyOption.REPLACE_EXISTING);
+                        restored++;
+                    }
+                }
+            }
+            refreshModsForSelectedInstance();
+            log.appendText("Restored " + restored + " file(s) from backup." + System.lineSeparator());
+        } catch (IOException e) {
+            log.appendText("Restore failed: " + e.getMessage() + System.lineSeparator());
+        }
     }
 
-    private void openDirectory(Path path) {
-        try { Files.createDirectories(path); if (Desktop.isDesktopSupported()) Desktop.getDesktop().open(path.toFile()); }
-        catch (IOException ex) { status.setText("Could not open folder: " + ex.getMessage()); }
-    }
-    private void withInstance(java.util.function.Consumer<InstanceStore.InstanceProfile> action) { if (instanceChoice.getValue() != null) action.accept(instanceChoice.getValue()); }
-    private Window window() { return root.getScene() == null ? null : root.getScene().getWindow(); }
-    private void setBusy(boolean busy, String message) { progress.setVisible(busy); status.setText(message); }
-    private void log(String message) { Platform.runLater(() -> activity.appendText(message + System.lineSeparator())); }
-    private <T> void runTask(CheckedSupplier<T> action, java.util.function.Consumer<T> success) {
-        worker.submit(() -> {
-            try { T result = action.get(); Platform.runLater(() -> success.accept(result)); }
-            catch (Exception ex) { Platform.runLater(() -> { setBusy(false, "Action failed"); activity.appendText("Error: " + ex.getMessage() + System.lineSeparator()); }); }
+    private void searchModrinth() {
+        String query = searchField.getText() == null ? "" : searchField.getText().trim();
+        String version = versionBox.getValue();
+        String loader = loaderBox.getValue();
+
+        if (query.isBlank()) {
+            searchList.getItems().clear();
+            searchList.getItems().add("Type a mod name or keyword first");
+            return;
+        }
+
+        CompletableFuture.runAsync(() -> {
+            try {
+                String url = buildModrinthSearchUrl(query, version, loader);
+                HttpRequest req = HttpRequest.newBuilder(URI.create(url))
+                        .header("User-Agent", "Prismite/1.0")
+                        .GET()
+                        .build();
+
+                HttpResponse<String> response = http.send(req, HttpResponse.BodyHandlers.ofString());
+                if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                    PlatformHelper.run(() -> searchList.getItems().setAll("Request failed: HTTP " + response.statusCode()));
+                    return;
+                }
+
+                List<String> items = parseSearchResults(response.body());
+                PlatformHelper.run(() -> {
+                    searchList.getItems().setAll(items.isEmpty() ? List.of("No results found") : items);
+                    status.setText("Search complete · Minecraft " + version + " · loader: " + loader);
+                });
+            } catch (Exception e) {
+                PlatformHelper.run(() -> {
+                    searchList.getItems().setAll("Search failed: " + e.getMessage());
+                    log.appendText("Modrinth search error: " + e.getMessage() + System.lineSeparator());
+                });
+            }
         });
     }
-    @FunctionalInterface private interface CheckedSupplier<T> { T get() throws Exception; }
-    private VBox panel() { VBox box = new VBox(10); box.setPadding(new Insets(16)); box.setStyle("-fx-background-color: #171C24;"); return box; }
-    private Tab tab(String title, VBox panel) { Tab tab = new Tab(title); tab.setContent(panel); return tab; }
-    private Label heading(String text) { Label l = new Label(text); l.setTextFill(Color.web("#F5F7FF")); l.setFont(Font.font("Segoe UI", 21)); return l; }
-    private Label muted(String text) { Label l = new Label(text); l.setTextFill(Color.web("#B8C1D9")); l.setWrapText(true); return l; }
-    private Button button(String text, String bg, String fg) { Button b = new Button(text); b.setStyle("-fx-background-color: " + bg + "; -fx-text-fill: " + fg + "; -fx-font-weight: bold;"); return b; }
+
+    private String buildModrinthSearchUrl(String query, String version, String loader) throws UnsupportedEncodingException {
+        String base = "https://api.modrinth.com/v2/search?limit=12&query=" + URLEncoder.encode(query, StandardCharsets.UTF_8);
+        String facets = "[[\"project_type:mod\"]";
+        if (version != null && !version.isBlank()) {
+            facets += ", [\"versions:" + version + "\"]";
+        }
+        if (loader != null && !loader.isBlank() && !"vanilla".equalsIgnoreCase(loader)) {
+            facets += ", [\"categories:" + loader.toLowerCase(Locale.ROOT) + "\"]";
+        }
+        facets += "]";
+        return base + "&facets=" + URLEncoder.encode(facets, StandardCharsets.UTF_8);
+    }
+
+    private List<String> parseSearchResults(String json) {
+        List<String> results = new ArrayList<>();
+        int hitIndex = 0;
+        while (true) {
+            String key = "\"title\":";
+            int titlePos = json.indexOf(key, hitIndex);
+            if (titlePos == -1) break;
+            int start = titlePos + key.length();
+            int end = json.indexOf('"', start + 1);
+            if (end == -1) break;
+            String title = json.substring(start + 1, end - 1);
+
+            int descPos = json.indexOf("\"description\":", start);
+            String desc = "";
+            if (descPos != -1) {
+                int dStart = json.indexOf('"', descPos + 15);
+                int dEnd = json.indexOf('"', dStart + 1);
+                if (dStart != -1 && dEnd != -1) {
+                    desc = json.substring(dStart + 1, dEnd - 1).replace("\\n", " ");
+                }
+            }
+            results.add(title + " — " + desc);
+            hitIndex = end + 1;
+        }
+        return results;
+    }
+
+    private void installSelectedMod() {
+        String selected = searchList.getSelectionModel().getSelectedItem();
+        if (selected == null || selected.startsWith("No results") || selected.startsWith("Search failed") || selected.startsWith("Type a mod name")) {
+            log.appendText("Choose a mod from the Modrinth results first." + System.lineSeparator());
+            return;
+        }
+
+        InstanceProfile profile = getSelectedProfile();
+        if (profile == null) {
+            log.appendText("Select an instance first." + System.lineSeparator());
+            return;
+        }
+
+        String title = selected.split(" — ", 2)[0];
+        CompletableFuture.runAsync(() -> {
+            try {
+                String projectParam = URLEncoder.encode(title, StandardCharsets.UTF_8);
+                String version = versionBox.getValue();
+                String loader = loaderBox.getValue();
+                String url = "https://api.modrinth.com/v2/search?limit=1&query=" + projectParam + "&facets="
+                        + URLEncoder.encode("[[\"project_type:mod\"],[\"versions:" + version + "\"],[\"categories:" + loader.toLowerCase(Locale.ROOT) + "\"]]", StandardCharsets.UTF_8);
+                HttpRequest req = HttpRequest.newBuilder(URI.create(url)).header("User-Agent", "Prismite/1.0").GET().build();
+                HttpResponse<String> response = http.send(req, HttpResponse.BodyHandlers.ofString());
+                if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                    throw new IOException("Modrinth request failed: HTTP " + response.statusCode());
+                }
+
+                String body = response.body();
+                int projectIdPos = body.indexOf("\"project_id\":\"");
+                if (projectIdPos == -1) {
+                    throw new IOException("No project ID returned for " + title);
+                }
+                int start = projectIdPos + "\"project_id\":\"".length();
+                int end = body.indexOf('"', start);
+                String projectId = body.substring(start, end);
+
+                String versionsUrl = "https://api.modrinth.com/v2/project/" + projectId + "/version?loaders=[\"" + loader.toLowerCase(Locale.ROOT) + "\"]&game_versions=[\"" + version + "\"]";
+                HttpRequest versionsReq = HttpRequest.newBuilder(URI.create(versionsUrl)).header("User-Agent", "Prismite/1.0").GET().build();
+                HttpResponse<String> versionsResponse = http.send(versionsReq, HttpResponse.BodyHandlers.ofString());
+                if (versionsResponse.statusCode() < 200 || versionsResponse.statusCode() >= 300) {
+                    throw new IOException("Version lookup failed: HTTP " + versionsResponse.statusCode());
+                }
+
+                String versionsBody = versionsResponse.body();
+                int fileUrlPos = versionsBody.indexOf("\"url\":\"");
+                int fileNamePos = versionsBody.indexOf("\"filename\":\"");
+                if (fileUrlPos == -1 || fileNamePos == -1) {
+                    throw new IOException("No downloadable file found for " + title + ". Try another version or loader.");
+                }
+                int urlStart = fileUrlPos + "\"url\":\"".length();
+                int urlEnd = versionsBody.indexOf('"', urlStart);
+                String fileUrl = versionsBody.substring(urlStart, urlEnd).replace("\\/", "/");
+
+                int nameStart = fileNamePos + "\"filename\":\"".length();
+                int nameEnd = versionsBody.indexOf('"', nameStart);
+                String fileName = versionsBody.substring(nameStart, nameEnd);
+
+                Path target = profile.modsDir().resolve(fileName);
+                HttpRequest downloadReq = HttpRequest.newBuilder(URI.create(fileUrl)).header("User-Agent", "Prismite/1.0").GET().build();
+                HttpResponse<InputStream> fileResponse = http.send(downloadReq, HttpResponse.BodyHandlers.ofInputStream());
+                if (fileResponse.statusCode() < 200 || fileResponse.statusCode() >= 300) {
+                    throw new IOException("Download failed: HTTP " + fileResponse.statusCode());
+                }
+                try (InputStream in = fileResponse.body()) {
+                    Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
+                }
+                PlatformHelper.run(() -> {
+                    log.appendText("Installed: " + fileName + System.lineSeparator());
+                    refreshModsForSelectedInstance();
+                });
+            } catch (Exception e) {
+                PlatformHelper.run(() -> log.appendText("Install failed: " + e.getMessage() + System.lineSeparator()));
+            }
+        });
+    }
+
+    private InstanceProfile getSelectedProfile() {
+        if (selectedInstanceId == null) return null;
+        return instances.get(selectedInstanceId);
+    }
+
+    private static String cleanId(String value) {
+        String cleaned = value.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "-");
+        return cleaned.replaceAll("^-|-$", "");
+    }
+
+    private static Button styledButton(String text, String bg, String fg) {
+        Button b = new Button(text);
+        b.setStyle("-fx-background-color: " + bg + "; -fx-text-fill: " + fg + "; -fx-font-weight: bold;");
+        return b;
+    }
+
+    public BorderPane getRoot() {
+        return root;
+    }
+
+    private static final class InstanceProfile {
+        private final String id;
+        private final String name;
+        private final String version;
+        private final String loader;
+        private final String directory;
+
+        InstanceProfile(String id, String name, String version, String loader, String directory) {
+            this.id = id;
+            this.name = name;
+            this.version = version;
+            this.loader = loader;
+            this.directory = directory;
+        }
+
+        String id() { return id; }
+        String name() { return name; }
+        String version() { return version; }
+        String loader() { return loader; }
+        String directory() { return directory; }
+
+        Path modsDir() {
+            try {
+                Path dir = Path.of(directory).resolve("mods");
+                Files.createDirectories(dir);
+                return dir;
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+    }
+
+    private static final class PlatformHelper {
+        static void run(Runnable action) {
+            javafx.application.Platform.runLater(action);
+        }
+    }
 }
+
